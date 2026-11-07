@@ -46,6 +46,10 @@ function hana_q(string $value): string {
 	return "'" . str_replace("'", "''", $value) . "'";
 }
 
+function hana_schema_sql(): string {
+	return (DB != "" ? hana_q(DB) : "CURRENT_SCHEMA");
+}
+
 if (isset($_GET["hana"])) {
 	define("Adminer\DRIVER", "hana");
 
@@ -158,6 +162,12 @@ if (isset($_GET["hana"])) {
 					$this->errno = 1;
 					return false;
 				}
+				// page=last asks Adminer for COUNT(*). That scans a live table.
+				if (isset($_GET["page"]) && $_GET["page"] === "last" && preg_match('~^\\s*SELECT\\s+COUNT\\s*\\(~i', (string) $F)) {
+					$this->error = "Whole-table COUNT is disabled on this live connection.";
+					$this->errno = 1;
+					return false;
+				}
 				$result = @odbc_exec($this->odbc, (string) $F);
 				$this->error = "";
 				if (!$result) {
@@ -219,6 +229,10 @@ if (isset($_GET["hana"])) {
 
 		function operators($tableStatus = null) {
 			return array("=", "<", ">", "<=", ">=", "!=", "LIKE", "LIKE %%", "IN", "IS NULL", "NOT LIKE", "NOT IN", "IS NOT NULL", "SQL");
+		}
+
+		function allFields() {
+			return array(); // shortcut: one DESCRIBE per table; 11k tables never finishes
 		}
 
 		function insert($table, array $set) {
@@ -395,6 +409,41 @@ if (isset($_GET["hana"])) {
 
 	function explain($connection, $query) {
 		return false;
+	}
+
+	function convert_field(array $field) {
+	}
+
+	function unconvert_field(array $field, $value) {
+		return $value;
+	}
+
+	function found_rows(array $tableStatus, array $where) {
+		// Null makes Adminer run COUNT(*) on the live table.
+		$page = (isset($_GET["page"]) && is_numeric($_GET["page"]) ? (int) $_GET["page"] : 0);
+		$limit = (isset($_GET["limit"]) && is_numeric($_GET["limit"]) ? (int) $_GET["limit"] : 50);
+		if ($page < 0) {
+			$page = 0;
+		}
+		if ($limit < 1) {
+			$limit = 50;
+		}
+		$next = ($page + 2) * $limit;
+		$name = (string) idx($tableStatus, "Name", "");
+		if ($where || $name === "") {
+			return $next; // a filtered COUNT(*) can scan the table
+		}
+		$n = get_val(
+			"SELECT SUM(RECORD_COUNT) FROM SYS.M_TABLES WHERE SCHEMA_NAME = " . hana_schema_sql()
+			. " AND TABLE_NAME = " . hana_q($name)
+		);
+		if (connection()->error) {
+			connection()->error = "";
+			connection()->errno = 0;
+			return $next;
+		}
+		$n = (int) $n;
+		return ($n > $next ? $n : $next);
 	}
 
 	function support(string $feature): bool {
