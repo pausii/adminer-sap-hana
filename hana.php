@@ -266,7 +266,9 @@ if (isset($_GET["hana"])) {
 	}
 
 	function get_databases(bool $flush): array {
-		return get_vals("SELECT SCHEMA_NAME FROM SYS.SCHEMAS WHERE HAS_PRIVILEGES = 'TRUE' ORDER BY 1");
+		$return = get_vals("SELECT SCHEMA_NAME FROM SYS.SCHEMAS WHERE HAS_PRIVILEGES = 'TRUE'");
+		sort($return, SORT_STRING);
+		return $return;
 	}
 
 	function limit(string $query, string $where, ?int $limit, $offset = 0, $separator = " "): string {
@@ -285,26 +287,91 @@ if (isset($_GET["hana"])) {
 	}
 
 	function tables_list(): array {
-		// Qualify SYS.* — unqualified VIEWS/TABLES can resolve to a user object in CURRENT_SCHEMA.
+		// SYS.TABLES.TABLE_NAME is valid but empty for this schema.
+		// SYS.VIEWS has no TABLE_NAME (that was the red error). Use SYS.OBJECTS.
+		// shortcut: 50 names; a full schema (EJI_TRACE is 11k) freezes the menu
+		$schema = (DB != "" ? hana_q(DB) : "CURRENT_SCHEMA");
+		$find = trim((string) idx($_GET, "hana_find", ""));
+		$like = ($find !== "" ? " AND UPPER(OBJECT_NAME) LIKE UPPER(" . hana_q("%$find%") . ")" : "");
 		$return = array();
-		foreach (get_rows(
-			"SELECT TABLE_NAME AS name, 'table' AS type FROM SYS.TABLES WHERE SCHEMA_NAME = CURRENT_SCHEMA
-			UNION ALL
-			SELECT VIEW_NAME, 'view' FROM SYS.VIEWS WHERE SCHEMA_NAME = CURRENT_SCHEMA
-			ORDER BY 1"
-		) as $row) {
-			$return[$row["name"]] = $row["type"];
+		$rows = get_rows(
+			"SELECT OBJECT_NAME, OBJECT_TYPE FROM SYS.OBJECTS WHERE SCHEMA_NAME = $schema AND OBJECT_TYPE IN ('TABLE', 'VIEW')$like ORDER BY OBJECT_NAME LIMIT 50",
+			null,
+			""
+		);
+		$add = function ($row) use (&$return) {
+			$vals = array_values($row);
+			$name = trim((string) $vals[0]);
+			$type = strtoupper(trim((string) (isset($vals[1]) ? $vals[1] : "")));
+			foreach ($row as $key => $value) {
+				if (preg_match('~OBJECT_NAME$~i', (string) $key)) {
+					$name = trim((string) $value);
+				} elseif (preg_match('~OBJECT_TYPE$~i', (string) $key)) {
+					$type = strtoupper(trim((string) $value));
+				}
+			}
+			if ($name === "") {
+				return;
+			}
+			if (strpos($type, "VIEW") !== false) {
+				$return[$name] = "view";
+			} elseif (strpos($type, "TABLE") !== false) {
+				$return[$name] = "table";
+			}
+		};
+		if (!connection()->error) {
+			foreach ($rows as $row) {
+				$add($row);
+			}
+			$open = "";
+			foreach (array("select", "edit", "table", "view", "create") as $key) {
+				if (!empty($_GET[$key]) && is_string($_GET[$key])) {
+					$open = $_GET[$key];
+					break;
+				}
+			}
+			if ($open !== "" && !isset($return[$open])) {
+				foreach (get_rows(
+					"SELECT OBJECT_NAME, OBJECT_TYPE FROM SYS.OBJECTS WHERE SCHEMA_NAME = $schema AND OBJECT_NAME = " . hana_q($open) . " AND OBJECT_TYPE IN ('TABLE', 'VIEW')",
+					null,
+					""
+				) as $row) {
+					$add($row);
+				}
+			}
+			ksort($return, SORT_STRING);
+			return $return;
 		}
-		return $return;
+		return array();
 	}
 
 	function count_tables(array $databases): array {
 		$return = array();
 		foreach ($databases as $db) {
-			$return[$db] = (int) get_val(
-				"SELECT (SELECT COUNT(*) FROM SYS.TABLES WHERE SCHEMA_NAME = " . q($db) . ")
-				+ (SELECT COUNT(*) FROM SYS.VIEWS WHERE SCHEMA_NAME = " . q($db) . ") FROM DUMMY"
-			);
+			$return[$db] = 0;
+		}
+		if (!$return) {
+			return $return;
+		}
+		$in = array();
+		foreach ($databases as $db) {
+			$in[] = hana_q((string) $db);
+		}
+		// One catalog aggregate for the database list. Not one COUNT per schema, and not a scan of table data.
+		$rows = get_rows(
+			"SELECT SCHEMA_NAME, COUNT(*) AS N FROM SYS.OBJECTS WHERE OBJECT_TYPE IN ('TABLE', 'VIEW') AND SCHEMA_NAME IN (" . implode(", ", $in) . ") GROUP BY SCHEMA_NAME",
+			null,
+			""
+		);
+		if (connection()->error) {
+			return $return;
+		}
+		foreach ($rows as $row) {
+			$vals = array_values($row);
+			$name = (string) $vals[0];
+			if (isset($return[$name])) {
+				$return[$name] = (int) $vals[1];
+			}
 		}
 		return $return;
 	}
@@ -334,35 +401,39 @@ if (isset($_GET["hana"])) {
 		$pks = array();
 		foreach (get_vals(
 			"SELECT COLUMN_NAME FROM SYS.CONSTRAINTS
-			WHERE SCHEMA_NAME = CURRENT_SCHEMA AND TABLE_NAME = " . q($table) . " AND IS_PRIMARY_KEY = 'TRUE'
-			ORDER BY POSITION"
+			WHERE SCHEMA_NAME = " . hana_schema_sql() . " AND TABLE_NAME = " . hana_q($table) . " AND IS_PRIMARY_KEY = 'TRUE'"
 		) as $col) {
 			$pks[$col] = true;
 		}
 		$priv = hana_readonly()
 			? array("select" => 1, "where" => 1, "order" => 1)
 			: array("insert" => 1, "select" => 1, "update" => 1, "where" => 1, "order" => 1);
-		foreach (get_rows(
-			"SELECT COLUMN_NAME, DATA_TYPE_NAME, LENGTH, SCALE, IS_NULLABLE, DEFAULT_VALUE
+		$rows = get_rows(
+			"SELECT COLUMN_NAME, DATA_TYPE_NAME, LENGTH, SCALE, IS_NULLABLE, DEFAULT_VALUE, POSITION
 			FROM SYS.TABLE_COLUMNS
-			WHERE SCHEMA_NAME = CURRENT_SCHEMA AND TABLE_NAME = " . q($table) . "
-			ORDER BY POSITION"
-		) as $row) {
-			$type = strtolower($row["DATA_TYPE_NAME"]);
-			$length = $row["LENGTH"];
-			if ($row["SCALE"] !== null && $row["SCALE"] !== "" && preg_match('~decimal|number~', $type)) {
-				$length = $row["LENGTH"] . "," . $row["SCALE"];
+			WHERE SCHEMA_NAME = " . hana_schema_sql() . " AND TABLE_NAME = " . hana_q($table)
+		);
+		usort($rows, function ($a, $b) {
+			return (int) idx($a, "POSITION", idx($a, "position", 0)) <=> (int) idx($b, "POSITION", idx($b, "position", 0));
+		});
+		foreach ($rows as $row) {
+			$name = idx($row, "COLUMN_NAME", idx($row, "column_name"));
+			$type = strtolower((string) idx($row, "DATA_TYPE_NAME", idx($row, "data_type_name")));
+			$length = idx($row, "LENGTH", idx($row, "length"));
+			$scale = idx($row, "SCALE", idx($row, "scale"));
+			if ($scale !== null && $scale !== "" && preg_match('~decimal|number~', $type)) {
+				$length = $length . "," . $scale;
 			}
-			$return[$row["COLUMN_NAME"]] = array(
-				"field" => $row["COLUMN_NAME"],
+			$return[$name] = array(
+				"field" => $name,
 				"full_type" => $type . ($length !== null && $length !== "" ? "($length)" : ""),
 				"type" => $type,
 				"length" => $length,
-				"default" => $row["DEFAULT_VALUE"],
-				"null" => ($row["IS_NULLABLE"] == "TRUE"),
+				"default" => idx($row, "DEFAULT_VALUE", idx($row, "default_value")),
+				"null" => (idx($row, "IS_NULLABLE", idx($row, "is_nullable")) == "TRUE"),
 				"auto_increment" => false,
 				"privileges" => $priv,
-				"primary" => isset($pks[$row["COLUMN_NAME"]]),
+				"primary" => isset($pks[$name]),
 			);
 		}
 		return $return;
@@ -371,11 +442,10 @@ if (isset($_GET["hana"])) {
 	function indexes(string $table, ?Db $connection2 = null): array {
 		$return = array();
 		foreach (get_rows(
-			"SELECT CONSTRAINT_NAME, COLUMN_NAME, IS_PRIMARY_KEY, IS_UNIQUE_KEY
+			"SELECT CONSTRAINT_NAME, COLUMN_NAME, IS_PRIMARY_KEY, IS_UNIQUE_KEY, POSITION
 			FROM SYS.CONSTRAINTS
-			WHERE SCHEMA_NAME = CURRENT_SCHEMA AND TABLE_NAME = " . q($table) . "
-			AND (IS_PRIMARY_KEY = 'TRUE' OR IS_UNIQUE_KEY = 'TRUE')
-			ORDER BY CONSTRAINT_NAME, POSITION",
+			WHERE SCHEMA_NAME = " . hana_schema_sql() . " AND TABLE_NAME = " . hana_q($table) . "
+			AND (IS_PRIMARY_KEY = 'TRUE' OR IS_UNIQUE_KEY = 'TRUE')",
 			$connection2
 		) as $row) {
 			$name = $row["CONSTRAINT_NAME"];
@@ -511,6 +581,20 @@ JS);
 			. Adminer\h($on ? "Read-only: ON (click to allow writes)" : "Read-only: OFF (click to lock)")
 			. "'>";
 		echo "</form>\n";
+		if (defined("Adminer\DB") && Adminer\DB !== "") {
+			$find = (string) Adminer\idx($_GET, "hana_find", "");
+			echo "<form action=''><p>";
+			echo Adminer\hidden_fields_get();
+			echo Adminer\input_hidden("db", Adminer\DB);
+			foreach (array("ns", "select", "edit", "table", "sql", "dump", "import", "schema", "view", "create") as $key) {
+				if (isset($_GET[$key]) && is_string($_GET[$key])) {
+					echo Adminer\input_hidden($key, $_GET[$key]);
+				}
+			}
+			echo "<input type='search' name='hana_find' value='" . Adminer\h($find) . "' size='16' placeholder='Any table' autocapitalize='off'> ";
+			echo "<input type='submit' value='Find'>";
+			echo "</p></form>\n";
+		}
 	}
 
 	protected $translations = array(
