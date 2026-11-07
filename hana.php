@@ -284,7 +284,8 @@ if (isset($_GET["hana"])) {
 	}
 
 	function limit(string $query, string $where, ?int $limit, $offset = 0, $separator = " "): string {
-		return " $query$where" . ($limit !== null ? $separator . "LIMIT $limit" . ($offset ? " OFFSET $offset" : "") : "");
+		// 0 means unlimited (Adminer dump/export). LIMIT 0 would return no rows.
+		return " $query$where" . ($limit ? $separator . "LIMIT $limit" . ($offset ? " OFFSET $offset" : "") : "");
 	}
 
 	function limit1(string $table, string $query, string $where, $separator = "\n"): string {
