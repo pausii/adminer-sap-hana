@@ -6,6 +6,16 @@ connected through PHP **PDO_ODBC** and the SAP **HDBODBC** client.
 It is a single PHP file with no build step. Optional **read-only** mode is on by default
 and can be toggled from the login form (HANA only) or from the navigation bar after login.
 
+## Screenshots
+
+Login — System = SAP HANA, Read-only checked by default:
+
+![Adminer login with SAP HANA selected](docs/screenshots/login.png)
+
+After login — schemas as databases, table list, Read-only toggle in the sidebar:
+
+![Adminer after login to SAP HANA](docs/screenshots/logged-in.png)
+
 ## Features
 
 - **SAP HANA** appears in Adminer’s System dropdown next to MySQL, PostgreSQL, etc.
