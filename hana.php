@@ -613,9 +613,8 @@ JS);
 					echo Adminer\input_hidden($key, $_GET[$key]);
 				}
 			}
-			echo "<input type='search' name='hana_find' value='" . Adminer\h($find) . "' size='16' placeholder='Any table' autocapitalize='off'> ";
+			echo "<input type='search' name='hana_find' value='" . Adminer\h($find) . "' size='16' placeholder='Find table' autocapitalize='off'> ";
 			echo "<input type='submit' value='Find'>";
-			echo "<br><span>Common SAP tables. Find searches all.</span>";
 			echo "</p></form>\n";
 		}
 	}
