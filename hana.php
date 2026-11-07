@@ -590,6 +590,53 @@ JS);
 			Adminer\hana_set_readonly(!Adminer\hana_readonly());
 			Adminer\redirect(Adminer\relative_uri());
 		}
+		if (Adminer\hana_readonly() && isset($_GET["edit"]) && is_string($_GET["edit"])) {
+			Adminer\redirect(Adminer\ME . "select=" . Adminer\url_escape($_GET["edit"]));
+		}
+	}
+
+	function head($dark = null) {
+		if (!defined("Adminer\DRIVER") || Adminer\DRIVER !== "hana" || !Adminer\hana_readonly()) {
+			return null;
+		}
+		// Adminer always prints Edit/Clone/Delete; hide them in read-only mode.
+		echo "<style>a.edit,.footer fieldset:has(input[name=delete]){display:none!important}</style>\n";
+		return null;
+	}
+
+	function selectLinks($tableStatus, $set = "") {
+		if (!defined("Adminer\DRIVER") || Adminer\DRIVER !== "hana" || !Adminer\hana_readonly()) {
+			return null;
+		}
+		$name = $tableStatus["Name"];
+		echo '<p class="links">';
+		$links = array();
+		if ($name != "") {
+			$links["select"] = Adminer\lang(50);
+		}
+		if (Adminer\support("table") || Adminer\support("indexes")) {
+			$links["table"] = Adminer\lang(51);
+		}
+		foreach ($links as $key => $val) {
+			echo " <a href='" . Adminer\h(Adminer\ME) . "$key=" . Adminer\url_escape($name) . "'"
+				. Adminer\bold(isset($_GET[$key])) . ">$val</a>";
+		}
+		echo "\n";
+		return true;
+	}
+
+	function selectCommandPrint() {
+		if (!defined("Adminer\DRIVER") || Adminer\DRIVER !== "hana" || !Adminer\hana_readonly()) {
+			return null;
+		}
+		return false;
+	}
+
+	function selectImportPrint() {
+		if (!defined("Adminer\DRIVER") || Adminer\DRIVER !== "hana" || !Adminer\hana_readonly()) {
+			return null;
+		}
+		return false;
 	}
 
 	function navigation($missing) {
