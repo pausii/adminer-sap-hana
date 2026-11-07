@@ -50,6 +50,18 @@ function hana_schema_sql(): string {
 	return (DB != "" ? hana_q(DB) : "CURRENT_SCHEMA");
 }
 
+/** SAP Business One tables people actually open. The sidebar shows only those that exist. */
+function hana_common_tables(): array {
+	return array(
+		"OCRD", "CRD1", "OCPR", "OITM", "ITM1", "OITW", "OITB", "OWHS", "OSLP", "OCTG", "OCRG", "OACT", "OHEM", "OUSR",
+		"OQUT", "QUT1", "ORDR", "RDR1", "ODLN", "DLN1", "ORDN", "RDN1", "OINV", "INV1", "ORIN", "RIN1",
+		"OPQT", "PQT1", "OPOR", "POR1", "OPDN", "PDN1", "ORPD", "RPD1", "OPCH", "PCH1", "ORPC", "RPC1",
+		"OIGN", "IGN1", "OIGE", "IGE1", "OWTR", "WTR1", "OINC", "INC1", "OBTN", "OBTQ", "OSRN", "OITL", "ITL1",
+		"OJDT", "JDT1", "OVPM", "VPM2", "ORCT", "RCT2", "OFPR",
+		"OWOR", "WOR1", "OITT", "ITT1",
+	);
+}
+
 if (isset($_GET["hana"])) {
 	define("Adminer\DRIVER", "hana");
 
@@ -289,13 +301,23 @@ if (isset($_GET["hana"])) {
 	function tables_list(): array {
 		// SYS.TABLES.TABLE_NAME is valid but empty for this schema.
 		// SYS.VIEWS has no TABLE_NAME (that was the red error). Use SYS.OBJECTS.
-		// shortcut: 50 names; a full schema (EJI_TRACE is 11k) freezes the menu
+		// shortcut: sidebar is the common-table map; Find still searches every name, 50 at a time
 		$schema = (DB != "" ? hana_q(DB) : "CURRENT_SCHEMA");
 		$find = trim((string) idx($_GET, "hana_find", ""));
-		$like = ($find !== "" ? " AND UPPER(OBJECT_NAME) LIKE UPPER(" . hana_q("%$find%") . ")" : "");
+		if ($find !== "") {
+			$like = " AND UPPER(OBJECT_NAME) LIKE UPPER(" . hana_q("%$find%") . ")";
+			$limit = 50;
+		} else {
+			$in = array();
+			foreach (hana_common_tables() as $name) {
+				$in[] = hana_q($name);
+			}
+			$like = " AND OBJECT_NAME IN (" . implode(", ", $in) . ")";
+			$limit = count($in);
+		}
 		$return = array();
 		$rows = get_rows(
-			"SELECT OBJECT_NAME, OBJECT_TYPE FROM SYS.OBJECTS WHERE SCHEMA_NAME = $schema AND OBJECT_TYPE IN ('TABLE', 'VIEW')$like ORDER BY OBJECT_NAME LIMIT 50",
+			"SELECT OBJECT_NAME, OBJECT_TYPE FROM SYS.OBJECTS WHERE SCHEMA_NAME = $schema AND OBJECT_TYPE IN ('TABLE', 'VIEW')$like ORDER BY OBJECT_NAME LIMIT $limit",
 			null,
 			""
 		);
@@ -593,6 +615,7 @@ JS);
 			}
 			echo "<input type='search' name='hana_find' value='" . Adminer\h($find) . "' size='16' placeholder='Any table' autocapitalize='off'> ";
 			echo "<input type='submit' value='Find'>";
+			echo "<br><span>Common SAP tables. Find searches all.</span>";
 			echo "</p></form>\n";
 		}
 	}
