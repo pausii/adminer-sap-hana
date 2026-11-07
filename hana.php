@@ -1,6 +1,6 @@
 <?php
 
-/** SAP HANA driver for Adminer (PDO_ODBC + HDBODBC)
+/** SAP HANA driver for Adminer (ext/odbc + HDBODBC)
 * Read-only mode: login checkbox (shown only for System = SAP HANA) + nav toggle; default ON.
 * Server: host:30015 | ODBC DSN name | Driver={HDBODBC};ServerNode=host:30015;encrypt=true
 * @author Ahmad Pausi
@@ -41,12 +41,69 @@ function hana_query_allowed(string $query): bool {
 	return true;
 }
 
+/** PDO_ODBC::quote() is unimplemented and returns false, which deletes string literals from SQL. */
+function hana_q(string $value): string {
+	return "'" . str_replace("'", "''", $value) . "'";
+}
+
 if (isset($_GET["hana"])) {
 	define("Adminer\DRIVER", "hana");
 
-	if (extension_loaded("pdo_odbc")) {
-		class Db extends PdoDb {
-			public $extension = "PDO_ODBC";
+	if (extension_loaded("odbc")) {
+		/** Buffered ODBC result. PDO_ODBC's SQLBindCol makes HDBODBC report a row count and return no rows. */
+		class HanaResult {
+			public $num_rows = 0;
+			public $_offset = 0;
+			private $buffer = array();
+			private $pos = 0;
+			private $names = array();
+
+			function fill($result) {
+				$width = odbc_num_fields($result);
+				for ($i = 1; $i <= $width; $i++) {
+					$name = (string) odbc_field_name($result, $i);
+					$this->names[] = ($name !== "" ? $name : ("col" . $i));
+				}
+				odbc_binmode($result, ODBC_BINMODE_RETURN);
+				odbc_longreadlen($result, 1048576);
+				while (odbc_fetch_row($result)) {
+					$row = array();
+					for ($i = 1; $i <= $width; $i++) {
+						$value = odbc_result($result, $this->names[$i - 1]);
+						$row[] = ($value === false ? null : $value);
+					}
+					$this->buffer[] = $row;
+				}
+				$this->num_rows = count($this->buffer);
+			}
+
+			function fetch_assoc() {
+				if (!isset($this->buffer[$this->pos])) {
+					return false;
+				}
+				$row = $this->buffer[$this->pos++];
+				$out = array();
+				foreach ($row as $i => $value) {
+					$out[$this->names[$i]] = $value;
+				}
+				return $out;
+			}
+
+			function fetch_row() {
+				$row = $this->fetch_assoc();
+				return (is_array($row) ? array_values($row) : $row);
+			}
+
+			function fetch_field() {
+				$i = $this->_offset++;
+				$name = (isset($this->names[$i]) && $this->names[$i] !== "" ? $this->names[$i] : ("col" . ($i + 1)));
+				return (object) array("name" => $name, "native_type" => "");
+			}
+		}
+
+		class Db extends SqlDb {
+			public $extension = "ODBC";
+			private $odbc;
 
 			function attach(array $server, $username, $password) {
 				$host = $server["host"];
@@ -55,9 +112,9 @@ if (isset($_GET["hana"])) {
 				$raw = SERVER;
 
 				if (stripos($raw, "Driver=") !== false || stripos($raw, "ServerNode=") !== false) {
-					$dsn = "odbc:" . $raw;
+					$dsn = $raw;
 				} elseif ($host === "" && $port === "" && $path === "" && $raw !== "") {
-					$dsn = "odbc:" . $raw;
+					$dsn = $raw;
 				} else {
 					// Reject ODBC metacharacters in parsed parts (DSN injection).
 					foreach (array($host, $port, $path) as $part) {
@@ -67,20 +124,28 @@ if (isset($_GET["hana"])) {
 					}
 					$node = ($host !== "" ? $host : "localhost") . ($port !== "" ? ":$port" : ":30015");
 					$driver = getenv("ADMINER_HANA_ODBC_DRIVER") ?: "HDBODBC";
-					$dsn = "odbc:Driver={$driver};ServerNode={$node}";
+					$dsn = "Driver={$driver};ServerNode={$node};CHAR_AS_UTF8=1";
 					if ($path !== "") {
 						$dsn .= ";DatabaseName=" . ltrim($path, "/");
 					}
 				}
+				$dsn = preg_replace('~^odbc:~i', '', $dsn);
 
-				$return = $this->dsn($dsn, $username, $password);
-				if ($return === "") {
-					$info = get_val("SELECT VALUE FROM M_DATABASE", 0, $this);
-					if ($info) {
-						$this->server_info = $info;
-					}
+				$this->odbc = @odbc_connect($dsn, $username, $password, SQL_CUR_USE_DRIVER);
+				if (!$this->odbc) {
+					$err = odbc_errormsg();
+					return ($err ? $err : "ODBC connection failed.");
 				}
-				return $return;
+				$this->server_info = "";
+				$info = get_val("SELECT VALUE FROM M_DATABASE", 0, $this);
+				if ($info) {
+					$this->server_info = $info;
+				}
+				return "";
+			}
+
+			function quote($string) {
+				return hana_q((string) $string);
 			}
 
 			function select_db($database) {
@@ -93,13 +158,32 @@ if (isset($_GET["hana"])) {
 					$this->errno = 1;
 					return false;
 				}
-				return parent::query($F, $en);
+				$result = @odbc_exec($this->odbc, (string) $F);
+				$this->error = "";
+				if (!$result) {
+					$this->errno = odbc_error($this->odbc);
+					$this->error = odbc_errormsg($this->odbc);
+					if (!$this->error) {
+						$this->error = "Query failed.";
+					}
+					return false;
+				}
+				if (!odbc_num_fields($result)) {
+					$rows = odbc_num_rows($result);
+					$this->affected_rows = ($rows > 0 ? $rows : 0);
+					odbc_free_result($result);
+					return true;
+				}
+				$statement = new HanaResult();
+				$statement->fill($result);
+				odbc_free_result($result);
+				return $statement;
 			}
 		}
 	}
 
 	class Driver extends SqlDriver {
-		static $extensions = array("PDO_ODBC");
+		static $extensions = array("ODBC");
 		static $jush = "hana";
 		static $serverPorts = array(30015, 30013, 30041, 443);
 
@@ -307,6 +391,10 @@ if (isset($_GET["hana"])) {
 
 	function types(): array {
 		return array();
+	}
+
+	function explain($connection, $query) {
+		return false;
 	}
 
 	function support(string $feature): bool {
